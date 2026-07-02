@@ -11,7 +11,7 @@ import logging
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
@@ -986,11 +986,14 @@ async def analyze(
     verdict = "FAIL" if fail_count > 0 else report.get("finalVerdict", "PASS")
 
     run_id = uuid.uuid4().hex
-    created_at = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    created_at_iso = now.isoformat()
+    ttl_days = int(os.environ.get("DRISHTI_ANALYSES_TTL_DAYS", 90))
+    expire_at = now + timedelta(days=ttl_days)
 
     doc = {
         "id": run_id,
-        "created_at": created_at,
+        "created_at": created_at_iso,
         "query": query,
         "sops": sops,
         "media_type": media_type,
@@ -1008,7 +1011,10 @@ async def analyze(
     db = get_db()
     if db:
         try:
-            db.collection("analyses").document(run_id).set(doc)
+            fs_doc = doc.copy()
+            fs_doc["created_at"] = now
+            fs_doc["expire_at"] = expire_at
+            db.collection("analyses").document(run_id).set(fs_doc)
         except Exception as exc:
             logger.warning("Firestore write failed: %s", exc)
 
