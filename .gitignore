@@ -9,3 +9,7 @@ venv/
 dist/
 build/
 .DS_Store
+.coverage
+__pycache__/
+.pytest_cache/
+.venv/
