@@ -36,6 +36,9 @@ def post(rep, **data):
     (report([], "PASS"), "NEUTRAL"),
     ({"complianceChecks": [{"status": "PASS"}]}, "NEUTRAL"),  # missing finalVerdict
     ({"complianceChecks": "nope", "finalVerdict": "PASS"}, "NEUTRAL"),
+    ({"complianceChecks": [{"status": "fail"}]}, "FAIL"),  # lowercase fail, no finalVerdict
+    (report(["NEUTRAL", "NEUTRAL", "NEUTRAL"], "PASS"), "NEUTRAL"),  # no passing evidence
+    (report(["bogus", "??", "x"], "PASS"), "NEUTRAL"),  # invalid statuses coerce to NEUTRAL
 ])
 def test_compute_verdict(rep, expected):
     assert appmod.compute_verdict(rep)[0] == expected
@@ -169,17 +172,47 @@ def test_rate_limit_429(monkeypatch):
     assert codes == [200, 200, 429]
 
 
-def test_daily_cap():
+def _cap_db(count=None, boom=False):
     db = MagicMock()
-    snap = MagicMock(exists=True)
-    snap.to_dict.return_value = {"count": 5}
-    db.collection.return_value.document.return_value.get.return_value = snap
+    ref = db.collection.return_value.document.return_value
+    if boom:
+        ref.set.side_effect = RuntimeError("firestore down")
+    snap = MagicMock(exists=count is not None)
+    snap.to_dict.return_value = {"count": count}
+    ref.get.return_value = snap
+    return db, ref
+
+
+def test_daily_cap_counts_atomically():
     with patch.object(appmod, "DAILY_RUN_CAP", 5):
+        db, ref = _cap_db(5)  # post-increment count == cap: still allowed
+        assert appmod._daily_cap_state(db) == "ok"
+        ref.set.assert_called_once()
+        assert ref.set.call_args.kwargs.get("merge") is True  # atomic Increment merge, not read-then-set
+        db, _ = _cap_db(6)
+        assert appmod._daily_cap_state(db) == "exceeded"
         assert appmod._daily_cap_exceeded(db) is True
-    snap.to_dict.return_value = {"count": 1}
-    with patch.object(appmod, "DAILY_RUN_CAP", 5):
-        assert appmod._daily_cap_exceeded(db) is False
+
+
+def test_daily_cap_disabled():
     assert appmod._daily_cap_exceeded(None) is False
+
+
+def test_daily_cap_fails_closed_on_store_error():
+    with patch.object(appmod, "DAILY_RUN_CAP", 5):
+        db, _ = _cap_db(boom=True)
+        assert appmod._daily_cap_state(db) == "error"
+        assert appmod._daily_cap_state(None) == "error"
+
+
+def test_daily_cap_endpoint_status_codes():
+    with patch.object(appmod, "DAILY_RUN_CAP", 5):
+        db, _ = _cap_db(boom=True)
+        with patch("app.get_db", return_value=db):
+            assert client.post("/api/analyze", data={"query": "check it"}, files=FILES).status_code == 503
+        db, _ = _cap_db(9)
+        with patch("app.get_db", return_value=db):
+            assert client.post("/api/analyze", data={"query": "check it"}, files=FILES).status_code == 429
 
 
 # --- health --------------------------------------------------------------
@@ -235,11 +268,24 @@ def test_admin_empty():
         assert client.get("/admin", auth=("admin", "secret")).status_code == 200
 
 
-def test_get_analysis_requires_admin():
+def test_get_analysis_requires_admin_when_flag_on(monkeypatch):
+    monkeypatch.setattr(appmod, "ANALYSIS_REQUIRES_ADMIN", True)
     assert client.get("/api/analysis/abc").status_code == 401
+    assert client.get("/api/analysis/abc", auth=("admin", "wrong")).status_code == 401
 
 
-def test_get_analysis_serializes_datetimes():
+def test_get_analysis_public_by_default():
+    db = MagicMock()
+    doc = MagicMock(exists=True)
+    doc.to_dict.return_value = {"id": "abc"}
+    db.collection.return_value.document.return_value.get.return_value = doc
+    assert appmod.ANALYSIS_REQUIRES_ADMIN is False
+    with patch("app.get_db", return_value=db):
+        assert client.get("/api/analysis/abc").status_code == 200
+
+
+def test_get_analysis_serializes_datetimes(monkeypatch):
+    monkeypatch.setattr(appmod, "ANALYSIS_REQUIRES_ADMIN", True)
     from datetime import datetime, timezone
     db = MagicMock()
     doc = MagicMock(exists=True)
@@ -250,7 +296,8 @@ def test_get_analysis_serializes_datetimes():
     assert r.status_code == 200 and r.json()["id"] == "abc"
 
 
-def test_get_analysis_404_and_503():
+def test_get_analysis_404_and_503(monkeypatch):
+    monkeypatch.setattr(appmod, "ANALYSIS_REQUIRES_ADMIN", True)
     with patch("app.get_db", return_value=None):
         assert client.get("/api/analysis/abc", auth=("admin", "secret")).status_code == 503
     db = MagicMock()

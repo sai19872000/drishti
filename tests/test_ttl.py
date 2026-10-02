@@ -1,97 +1,51 @@
-import os
-import io
-import unittest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
 from fastapi.testclient import TestClient
 
-from app import app
+import app as appmod
 
-class TestTTL(unittest.TestCase):
-    def setUp(self):
-        self.client = TestClient(app)
-        
-    @patch('app.get_db')
-    @patch('app.run_pipeline')
-    def test_ttl_default(self, mock_run_pipeline, mock_get_db):
-        mock_run_pipeline.return_value = (
-            "plan", 
-            "logs", 
-            "results", 
-            {"finalVerdict": "PASS", "complianceChecks": []}
-        )
-        
-        mock_db = MagicMock()
-        mock_get_db.return_value = mock_db
-        mock_collection = MagicMock()
-        mock_db.collection.return_value = mock_collection
-        mock_document = MagicMock()
-        mock_collection.document.return_value = mock_document
-        
-        # Test with default TTL (90 days)
-            
-        file_content = b"test content"
-            
-        response = self.client.post(
-            "/api/analyze",
-            data={"query": "test query"},
-            files={"media": ("test_upload.jpg", file_content, "image/jpeg")}
-        )
-            
-        self.assertEqual(response.status_code, 200)
-        
-        # Assert the doc was written to Firestore
-        mock_db.collection.assert_called_with("analyses")
-        mock_collection.document.assert_called()
-        mock_document.set.assert_called_once()
-        
-        doc = mock_document.set.call_args[0][0]
-        
-        self.assertIn("created_at", doc)
-        self.assertIn("expire_at", doc)
-        
-        self.assertTrue(isinstance(doc["created_at"], datetime))
-        self.assertTrue(isinstance(doc["expire_at"], datetime))
-        
-        delta = doc["expire_at"] - doc["created_at"]
-        self.assertAlmostEqual(delta.total_seconds(), timedelta(days=90).total_seconds(), delta=3600)
-        
-    @patch('app.get_db')
-    @patch('app.run_pipeline')
-    def test_ttl_custom(self, mock_run_pipeline, mock_get_db):
-        mock_run_pipeline.return_value = (
-            "plan", 
-            "logs", 
-            "results", 
-            {"finalVerdict": "PASS", "complianceChecks": []}
-        )
-        
-        mock_db = MagicMock()
-        mock_get_db.return_value = mock_db
-        mock_collection = MagicMock()
-        mock_db.collection.return_value = mock_collection
-        mock_document = MagicMock()
-        mock_collection.document.return_value = mock_document
-        
-        # Test with custom TTL (7 days)
-        patcher = patch.dict(os.environ, {'DRISHTI_ANALYSES_TTL_DAYS': '7'})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-            
-        file_content = b"test content"
-            
-        response = self.client.post(
-            "/api/analyze",
-            data={"query": "test query"},
-            files={"media": ("test_upload.jpg", file_content, "image/jpeg")}
-        )
-            
-        self.assertEqual(response.status_code, 200)
-        
-        doc = mock_document.set.call_args[0][0]
-        
-        delta = doc["expire_at"] - doc["created_at"]
-        self.assertAlmostEqual(delta.total_seconds(), timedelta(days=7).total_seconds(), delta=3600)
+PIPELINE_RESULT = ("plan", "logs", "results", {"finalVerdict": "PASS", "complianceChecks": []})
 
-if __name__ == '__main__':
-    unittest.main()
+
+@pytest.fixture
+def written_doc():
+    """Run one analysis against a mocked Firestore and return the stored doc."""
+    client = TestClient(appmod.app)
+    db = MagicMock()
+    document = db.collection.return_value.document.return_value
+
+    def run():
+        with patch("app.get_db", return_value=db), patch("app.run_pipeline", return_value=PIPELINE_RESULT):
+            resp = client.post(
+                "/api/analyze",
+                data={"query": "test query"},
+                files={"media": ("test_upload.jpg", b"test content", "image/jpeg")},
+            )
+        assert resp.status_code == 200
+        db.collection.assert_called_with("analyses")
+        document.set.assert_called_once()
+        return document.set.call_args[0][0]
+
+    return run
+
+
+def test_ttl_default(written_doc):
+    doc = written_doc()
+    assert isinstance(doc["created_at"], datetime) and isinstance(doc["expire_at"], datetime)
+    delta = doc["expire_at"] - doc["created_at"]
+    assert abs(delta.total_seconds() - timedelta(days=90).total_seconds()) < 3600
+
+
+def test_ttl_custom(written_doc, monkeypatch):
+    monkeypatch.setenv("DRISHTI_ANALYSES_TTL_DAYS", "7")
+    doc = written_doc()
+    delta = doc["expire_at"] - doc["created_at"]
+    assert abs(delta.total_seconds() - timedelta(days=7).total_seconds()) < 3600
+
+
+def test_ttl_env_does_not_leak(written_doc):
+    # the custom-TTL test above must not leave DRISHTI_ANALYSES_TTL_DAYS behind
+    doc = written_doc()
+    assert (doc["expire_at"] - doc["created_at"]).days == 90

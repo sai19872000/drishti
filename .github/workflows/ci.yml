@@ -15,9 +15,37 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: |
-            requirements.txt
+            requirements.lock
             requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      - name: Lock file is up to date
+        run: |
+          pip-compile --quiet --strip-extras --no-header --no-annotate --output-file /tmp/relock.txt requirements.txt
+          python - <<'PY'
+          import re
+          def pins(p):
+              return {l.split("==")[0].lower() for l in open(p) if re.match(r"^[A-Za-z0-9_.\[\]-]+==", l)}
+          missing = pins("/tmp/relock.txt") ^ pins("requirements.lock")
+          assert not missing, f"requirements.lock out of date vs requirements.txt: {sorted(missing)}"
+          PY
       - run: pytest --cov=app --cov-report=term-missing --cov-fail-under=70
-      - name: Dependency audit
-        run: pip-audit -r requirements.txt
+      - name: Dependency audit (lock file)
+        run: pip-audit -r requirements.lock
+
+  a11y:
+    runs-on: ubuntu-latest
+    env:
+      REQUIRE_A11Y: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt playwright axe-playwright-python
+      - run: playwright install --with-deps chromium
+      - name: axe-core on / and /admin (0 serious/critical)
+        run: pytest tests/test_a11y.py -q
