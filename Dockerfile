@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
 ENV PORT=8080
 EXPOSE 8080
 

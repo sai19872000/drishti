@@ -5,16 +5,6 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 from fastapi.testclient import TestClient
 
-# Mock the entire google module before importing app to avoid Missing module errors
-import sys
-sys.modules['google'] = MagicMock()
-sys.modules['google.cloud'] = MagicMock()
-sys.modules['google.cloud.firestore'] = MagicMock()
-import google
-
-# Provide an api key to pass the basic check
-os.environ['GEMINI_API_KEY'] = 'test_key'
-
 from app import app
 
 class TestTTL(unittest.TestCase):
@@ -39,8 +29,6 @@ class TestTTL(unittest.TestCase):
         mock_collection.document.return_value = mock_document
         
         # Test with default TTL (90 days)
-        if 'DRISHTI_ANALYSES_TTL_DAYS' in os.environ:
-            del os.environ['DRISHTI_ANALYSES_TTL_DAYS']
             
         file_content = b"test content"
             
@@ -86,7 +74,9 @@ class TestTTL(unittest.TestCase):
         mock_collection.document.return_value = mock_document
         
         # Test with custom TTL (7 days)
-        os.environ['DRISHTI_ANALYSES_TTL_DAYS'] = '7'
+        patcher = patch.dict(os.environ, {'DRISHTI_ANALYSES_TTL_DAYS': '7'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
             
         file_content = b"test content"
             
