@@ -1,0 +1,6 @@
+-r requirements.lock
+pytest
+pytest-cov
+httpx
+pip-audit
+pip-tools
